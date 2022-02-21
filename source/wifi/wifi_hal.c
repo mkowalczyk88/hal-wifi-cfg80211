@@ -1085,6 +1085,7 @@ INT wifi_getRadioMaxBitRate(INT radioIndex, CHAR *output_string) //RDKB
             strcpy(output_string,"54 Mb/s");
         else if((strcmp(buf,"40MHz") == 0) && (radioIndex == 1))
             strcpy(output_string,"300 Mb/s");
+	else return RETURN_ERR;
         //TODO: CHECK VALID VALUE
     }
     WIFI_ENTRY_EXIT_DEBUG("Exiting %s:%d\n",__func__, __LINE__);
@@ -1440,6 +1441,7 @@ INT wifi_setRadioChannelMode(INT radioIndex, CHAR *channelMode, BOOL gOnlyFlag, 
     }
     else if (strcmp (channelMode,"11ACVHT80") == 0)
     {
+        writeBandWidth(radioIndex,"80MHz");
         wifi_setRadioOperatingChannelBandwidth(radioIndex,"80MHz");
         printf("\nChannel Mode is 802.11ac-80MHz(5GHz)\n");
     }
@@ -1920,42 +1922,66 @@ INT wifi_setRadioOperatingChannelBandwidth(INT radioIndex, CHAR *output_string) 
 {
     WIFI_ENTRY_EXIT_DEBUG("Inside %s:%d\n",__func__, __LINE__);
     struct params params={'\0'};
-    params.name = "vht_oper_chwidth";
     char config_file[MAX_BUF_SIZE] = {0};
+    bool ieee80211ac = false;
+    char vht_oper_chwidth[32] = {0};
 
     if(NULL == output_string)
         return RETURN_ERR;
 
     if(strcmp(output_string,"20MHz") == 0)  // This piece of code only support for wifi hal api's validation
-        params.value="0";
+        strncpy(vht_oper_chwidth, "0", 1);
     else if(strcmp(output_string,"40MHz") == 0)
-        params.value="0";
+        strncpy(vht_oper_chwidth, "0", 1);
     else if(strcmp(output_string,"80MHz") == 0)
-        params.value="1";
+        strncpy(vht_oper_chwidth, "1", 1);
     else if(strcmp(output_string,"160MHz") == 0)
-        params.value="2";
+        strncpy(vht_oper_chwidth, "2", 1);
     else if(strcmp(output_string,"80+80") == 0)
-        params.value="3";
+        strncpy(vht_oper_chwidth, "3", 1);
     else
     {
         printf("Invalid Bandwidth \n");
         return RETURN_ERR;
     }
 
-    sprintf(config_file,"%s%d.conf",CONFIG_PREFIX,radioIndex);
-    wifi_hostapdWrite(config_file,&params,1);
+    //Send chan_switch to all VAPs
+    for(int i=0; i < MAX_APS/NUMBER_OF_RADIOS; i++) {
+        int apIndex = radioIndex + i*NUMBER_OF_RADIOS;
 
-    if(radioIndex == 1)
-    {
-        params.name= "ieee80211n";
-        if(strcmp(output_string,"20MHz") == 0)
-            output_string="0";
-        else if(strcmp(output_string,"40MHz") == 0)
-            output_string="1";
+        params.name = "vht_oper_chwidth";
+	params.value = vht_oper_chwidth;
+	sprintf(config_file,"%s%d.conf",CONFIG_PREFIX,apIndex);
+	wifi_hostapdWrite(config_file,&params,1);
 
-        params.value = output_string;
-        sprintf(config_file,"%s%d.conf",CONFIG_PREFIX,radioIndex);
-        wifi_hostapdWrite(config_file,&params,1);
+        if(radioIndex == 1)
+        {
+            params.name="ieee80211n";
+            if(strcmp(output_string,"20MHz") == 0)
+		params.value="0";
+            else if(strcmp(output_string,"40MHz") == 0)
+		params.value="1";
+	    else if(strcmp(output_string, "80MHz") == 0)
+	    {
+	        params.value="1";
+		ieee80211ac = true;
+	    }
+
+            sprintf(config_file,"%s%d.conf",CONFIG_PREFIX,apIndex);
+            wifi_hostapdWrite(config_file,&params,1);
+
+	    if (ieee80211ac)
+	    {
+                sprintf(config_file,"%s%d.conf",CONFIG_PREFIX,apIndex);
+		params.name="ieee80211ac";
+		params.value="1";
+                wifi_hostapdWrite(config_file,&params,1);
+		params.name="vht_oper_centr_freq_seg0_idx";
+		params.value="42";
+                wifi_hostapdWrite(config_file,&params,1);
+		wifi_setRadioExtChannel(radioIndex, "Above");
+	    }
+	}
     }
 
     WIFI_ENTRY_EXIT_DEBUG("Exiting %s:%d\n",__func__, __LINE__);
@@ -2027,9 +2053,13 @@ INT wifi_setRadioExtChannel(INT radioIndex, CHAR *string) //Tr181	//AP only
             strcpy(ext_channel,"[HT40][SHORT-GI-20][HT40-]");
     }
 
-    params.value = ext_channel;
-    sprintf(config_file,"%s%d.conf",CONFIG_PREFIX,radioIndex);
-    wifi_hostapdWrite(config_file,&params,1);
+    for(int i=0; i < MAX_APS/NUMBER_OF_RADIOS; i++) {
+        int apIndex = radioIndex + i*NUMBER_OF_RADIOS;
+
+        params.value = ext_channel;
+        sprintf(config_file,"%s%d.conf",CONFIG_PREFIX,apIndex);
+        wifi_hostapdWrite(config_file,&params,1);
+    }
 
     //Set to wifi config only. Wait for wifi reset or wifi_pushRadioChannel to apply.
     WIFI_ENTRY_EXIT_DEBUG("Exiting %s:%d\n",__func__, __LINE__);
@@ -8879,13 +8909,20 @@ INT wifi_getRadioOperatingParameters(wifi_radio_index_t index, wifi_radio_operat
     memset(buf, 0, sizeof(buf));
     ret = wifi_getRadioOperatingChannelBandwidth(index, buf); // XXX: handle errors
     // XXX: only handle 20/40/80 modes for now
-    if (!strcmp(buf, "20MHz")) operationParam->channelWidth = WIFI_CHANNELBANDWIDTH_20MHZ;
-    else if (!strcmp(buf, "40MHz")) operationParam->channelWidth = WIFI_CHANNELBANDWIDTH_40MHZ;
-    else if (!strcmp(buf, "80MHz")) operationParam->channelWidth = WIFI_CHANNELBANDWIDTH_80MHZ;
+    if (ret == RETURN_OK)
+    {
+        if (!strcmp(buf, "20MHz")) operationParam->channelWidth = WIFI_CHANNELBANDWIDTH_20MHZ;
+        else if (!strcmp(buf, "40MHz")) operationParam->channelWidth = WIFI_CHANNELBANDWIDTH_40MHZ;
+        else if (!strcmp(buf, "80MHz")) operationParam->channelWidth = WIFI_CHANNELBANDWIDTH_80MHZ;
+        else
+        {
+            printf("Unknown HT mode: %s\n", buf);
+            return false;
+        }
+    }
     else
     {
-        printf("Unknown HT mode: %s\n", buf);
-        return false;
+        printf("wifi_getRadioOperatingChannelBandwidth() for index=%d returned error\n", index);
     }
 
     ret = wifi_getRadioChannel(index, &lval);
